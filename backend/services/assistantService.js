@@ -115,6 +115,57 @@ function validateCapabilities(capabilities, expectedType) {
 
   return validCapabilities;
 }
+function findDirectActionMatch(query, capabilities) {
+  const stopWords = new Set([
+    "a", "an", "the", "please", "i", "me", "my",
+    "can", "could", "would", "to", "do", "show"
+  ]);
+
+  const words = query
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word && !stopWords.has(word));
+
+  // Avoid unreliable one-word automatic matches.
+  if (words.length < 2) return null;
+
+  const matches = capabilities.map((item) => {
+    const name = (item.name || "").toLowerCase();
+    const label = (item.label || "").toLowerCase();
+    const description = (item.description || "").toLowerCase();
+
+    const searchableText = `${name} ${label} ${description}`;
+
+    const allWordsMatch = words.every((word) =>
+      searchableText.includes(word)
+    );
+
+    if (!allWordsMatch) return { item, score: 0 };
+
+    let score = 100;
+
+    if (words.every((word) => name.includes(word))) score += 30;
+    if (words.every((word) => label.includes(word))) score += 20;
+    if (words.every((word) => description.includes(word))) score += 10;
+
+    return { item, score };
+  });
+
+  matches.sort((a, b) => b.score - a.score);
+
+  if (!matches.length || matches[0].score === 0) return null;
+
+  // Do not guess if the best candidates have equal scores.
+  if (
+    matches.length > 1 &&
+    matches[0].score === matches[1].score
+  ) {
+    return null;
+  }
+
+  return matches[0].item;
+}
 
 // ==================================================
 // SYSTEM PROMPT
@@ -278,6 +329,12 @@ export async function runAssistant(
       capabilities,
       expectedType
     );
+    if (mode === "action") {
+  console.log(
+    "DIRECT MATCH:",
+    findDirectActionMatch(query, validCapabilities)
+  );
+}
 
     if (validCapabilities.length === 0) {
       return {
@@ -294,6 +351,48 @@ export async function runAssistant(
         "select_capability tool is not registered. Check navigationTools.js."
       );
     }
+    // Direct matching for actions before calling NVIDIA AI.
+if (mode === "action") {
+  const directMatch = findDirectActionMatch(
+    query,
+    validCapabilities
+  );
+
+  if (directMatch) {
+    console.log(
+      "Hourmaker direct action match:",
+      directMatch.name,
+      directMatch.id
+    );
+
+    const toolResult = await selectionTool.execute({
+      capabilityId: directMatch.id,
+      intent: "action"
+    });
+
+    if (
+      toolResult &&
+      toolResult.success === true &&
+      toolResult.capabilityId === directMatch.id
+    ) {
+      return {
+        type: "tool_result",
+        tool: "select_capability",
+        result: {
+          success: true,
+          capabilityId: directMatch.id,
+          intent: "action",
+          type: "action",
+          page: directMatch.name,
+          path: directMatch.path || null,
+          risk: directMatch.risk,
+          sensitive: directMatch.sensitive,
+          message: "Selected " + directMatch.name + "."
+        }
+      };
+    }
+  }
+}
 
     // Create AI client
     const ai = getAIClient();

@@ -168,14 +168,20 @@ function Dashboard() {
             <p>
               Choose a dashboard section above to explore more details.
             </p>
-             <button
-    type="button"
-    className="primary-button"
-    title="Generate a dashboard report"
-    onClick={() => {
-      alert("Dashboard report generated successfully!");
-    }}
-  ></button>
+            <button
+              type="button"
+              className="primary-button"
+              data-ai-action-id="generate-dashboard-report"
+              data-ai-description="Generate a dashboard report containing the overview, employee totals, active members, and pending invitations."
+              data-ai-category="reporting"
+              data-ai-risk="low"
+              title="Generate a dashboard report"
+              onClick={() => {
+                alert("Dashboard report generated successfully!");
+              }}
+            >
+              Generate Report
+            </button>
           </div>
         </>
       )}
