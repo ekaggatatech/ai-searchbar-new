@@ -1,131 +1,350 @@
-import React, { useEffect, useState } from "react";
+import {
+  saveDiscoveredActions,
+  findRegisteredAction
+} from "./actionRegistry";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import searchData from "../searchData";
+
 import {
   discoverCurrentPage,
   findDiscoveredButton,
   isSensitiveButton,
+  isVisible,
   observePageButtons,
 } from "./autoDiscovery";
+
 import "./AISearchBar.css";
 
 const PENDING_KEY = "hourmaker_pending_ai_action";
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:5000").replace(/\/+$/, "");
+
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:5000"
+).replace(/\/+$/, "");
+
 const API_URL = `${API_BASE_URL}/api/assistant/chat`;
 
-const STOP_WORDS = ["i", "me", "my", "the", "a", "an", "to", "please", "can", "could", "would", "want", "like", "need", "show", "open", "go", "take", "bring", "navigate", "get", "see", "view", "let", "us"];
+const STOP_WORDS = [
+  "i", "me", "my", "the", "a", "an", "to",
+  "please", "can", "could", "would", "want",
+  "like", "need", "show", "open", "go", "take",
+  "bring", "navigate", "get", "see", "view",
+  "let", "us"
+];
 
-const PAGE_ALIASES = {
-  Dashboard: ["home", "home page", "overview", "main page"],
-  "Dashboard Statistics": ["statistics", "dashboard stats", "stats"],
-  "Recent Team Activity": ["team activity", "recent activity"],
-  "Dashboard Quick Actions": ["quick actions", "quick action", "actions"],
-  "Team Management": ["team", "employees", "staff", "people"],
-  "Team Members List": ["employee list", "team list", "all employees", "members list"],
-  "Search Team Members": ["find employee", "search employee", "find member", "search members"],
-  "Edit Team Member": ["edit employee", "update employee", "change employee details"],
-  "Remove Team Member": ["remove employee", "delete employee", "remove member"],
-  "Manage Member Status": ["member status", "employee status", "active inactive"],
-  "Invite a Team Member": ["invite", "add employee", "new employee"],
-  "Account Settings": ["settings", "account", "profile settings"],
-  "Edit Profile": ["edit my profile", "change profile"],
-  "Email Notifications": ["notifications", "email settings"],
-  "Theme Settings": ["theme", "dark mode", "light mode"],
-  "Billing and Payments": ["billing", "payments", "subscription"],
-};
+const PENDING_MAX_AGE = 2 * 60 * 1000;
 
 function normalize(value) {
-  return String(value || "").toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
+/*
+  Find the capability selected by NVIDIA.
+*/
 function getSelectedCapability(result, capabilities) {
-  if (!result || result.type !== "tool_result" || result.tool !== "select_capability" ||
-      !result.result || result.result.success !== true || !result.result.capabilityId) return null;
-  return capabilities.find((item) => item.id === result.result.capabilityId) || null;
+  if (
+    !result ||
+    result.type !== "tool_result" ||
+    result.tool !== "select_capability" ||
+    !result.result ||
+    result.result.success !== true ||
+    !result.result.capabilityId
+  ) {
+    return null;
+  }
+
+  return (
+    capabilities.find(
+      (item) => item.id === result.result.capabilityId
+    ) || null
+  );
 }
 
+/*
+  NVIDIA backend request.
+*/
 async function askAssistant(query, capabilities, mode) {
   let response;
+
   try {
     response = await fetch(API_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, capabilities, mode }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query,
+        capabilities,
+        mode,
+      }),
     });
   } catch (error) {
     console.error("Backend connection error:", error);
-    throw new Error(`Cannot connect to backend. Check whether it is running at ${API_BASE_URL}`);
+
+    throw new Error(
+      `Cannot connect to backend. Check whether it is running at ${API_BASE_URL}`
+    );
   }
 
   let data;
+
   try {
     data = await response.json();
   } catch {
-    throw new Error(`Backend returned an invalid response. HTTP status: ${response.status}`);
+    throw new Error(
+      `Backend returned an invalid response. HTTP status: ${response.status}`
+    );
   }
 
   if (!response.ok || data.success === false) {
-    throw new Error(data.message || data.answer || `Backend request failed. HTTP status: ${response.status}`);
+    throw new Error(
+      data.message ||
+      data.answer ||
+      `Backend request failed. HTTP status: ${response.status}`
+    );
   }
+
   return data;
 }
 
+/*
+  Wait until React renders the destination page actions.
+*/
 async function waitForDiscoveredButtons() {
-  for (let attempt = 0; attempt < 15; attempt += 1) {
+  const maxAttempts = 20;
+  const delay = 250;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const buttons = discoverCurrentPage();
-    if (buttons && buttons.length > 0) return buttons;
-    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    if (buttons.length > 0) {
+      return buttons;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
+
   return [];
 }
 
+/*
+  Convert discovered DOM elements into AI capabilities.
+*/
 function toButtonCapabilities(buttons) {
   return buttons
-    .filter((item) => item && item.id && item.enabled !== false && item.visible !== false)
+    .filter(
+      (item) =>
+        item &&
+        item.id &&
+        item.enabled !== false &&
+        item.visible !== false
+    )
     .map((item) => ({
       id: item.id,
       name: item.name || item.label || "",
       label: item.label || item.name || "",
-      description: item.description || item.name || item.label || "",
-      type: item.type || "action",
-      category: item.category || "action",
+      description:
+        item.description ||
+        item.name ||
+        item.label ||
+        "",
+
+      type: "action",
+      category: item.category || "ui-action",
+
       page: item.page,
       pageTitle: item.pageTitle,
+
       risk: item.risk,
       sensitive: item.sensitive,
+
       enabled: item.enabled !== false,
       visible: item.visible !== false,
     }));
 }
 
-// "generate report" matches "Generate a dashboard report", but not "Statistics".
+/*
+  Match an action directly when the user's words uniquely
+  identify one visible action.
+*/
 function findExactActionMatch(query, capabilities) {
-  const ignored = new Set(["a", "an", "the", "please", "my", "me", "i", "to"]);
-  const queryWords = normalize(query).split(" ").filter((word) => word && !ignored.has(word));
+  const ignored = new Set([
+    "a", "an", "the", "please", "my", "me", "i", "to"
+  ]);
+
+  const queryWords = normalize(query)
+    .split(" ")
+    .filter((word) => word && !ignored.has(word));
+
   if (!queryWords.length) return null;
 
   const matches = capabilities.filter((item) => {
-    if (item.type !== "action" || item.enabled === false || item.visible === false) return false;
-    const candidateWords = normalize(`${item.name || ""} ${item.label || ""}`).split(" ").filter(Boolean);
+    if (
+      item.type !== "action" ||
+      item.enabled === false ||
+      item.visible === false
+    ) {
+      return false;
+    }
+
+    const candidateWords = normalize(
+      `${item.name || ""} ${item.label || ""}`
+    )
+      .split(" ")
+      .filter(Boolean);
+
     return queryWords.every((queryWord) =>
-      candidateWords.some((candidateWord) => candidateWord === queryWord || candidateWord.startsWith(queryWord))
+      candidateWords.some(
+        (candidateWord) =>
+          candidateWord === queryWord ||
+          candidateWord.startsWith(queryWord)
+      )
     );
   });
+
   return matches.length === 1 ? matches[0] : null;
 }
 
-function canExecuteButton(button, capability) {
-  return Boolean(
-    button && button.isConnected && !button.disabled &&
-    button.getAttribute("aria-disabled") !== "true" &&
-    capability && capability.sensitive !== true &&
-    capability.risk !== "manual" && !isSensitiveButton(button)
+function isPageNameQuery(query, page) {
+  const ignored = new Set([
+    ...STOP_WORDS,
+    "page",
+    "section"
+  ]);
+
+  const queryWords = normalize(query)
+    .split(" ")
+    .filter((word) => word && !ignored.has(word));
+
+  const pageWords = normalize(
+    `${page?.name || ""} ${page?.title || ""} ${page?.path || ""}`
+  ).split(" ").filter(Boolean);
+
+  return (
+    queryWords.length > 0 &&
+    queryWords.every((word) =>
+      pageWords.some(
+        (pageWord) =>
+          pageWord === word || pageWord.startsWith(word)
+      )
+    )
   );
 }
 
-export default function AISearchBar({ role }) {
+
+function isRelevantAction(query, capability) {
+  const ignoredWords = new Set([
+    ...STOP_WORDS,
+    "member",
+    "members",
+    "team",
+    "page",
+    "section"
+  ]);
+
+  const queryWords = normalize(query)
+    .split(" ")
+    .filter((word) => word && !ignoredWords.has(word));
+
+  const actionText = normalize(
+    `${capability?.name || ""} ${capability?.label || ""} ${capability?.description || ""}`
+  );
+
+  // Require at least one meaningful matching word.
+  if (queryWords.length === 0) {
+    return false;
+  }
+
+  return queryWords.some((word) =>
+    actionText.split(" ").some(
+      (actionWord) =>
+        actionWord === word || actionWord.startsWith(word)
+    )
+  );
+}
+
+
+/*
+  Safety check before executing an action.
+*/
+
+function canExecuteButton(button, capability) {
+  const risk = String(capability?.risk || "").toLowerCase();
+
+  const requiresManualAction = [
+    "high",
+    "confirm",
+    "manual",
+    "critical"
+  ].includes(risk);
+
+  const hasConfirmationAttribute =
+    button?.getAttribute("data-ai-confirm") === "true" ||
+    button?.getAttribute("data-ai-sensitive") === "true";
+
+  return Boolean(
+    button &&
+    button.isConnected &&
+    !button.disabled &&
+    button.getAttribute("aria-disabled") !== "true" &&
+    isVisible(button) &&
+    capability &&
+    capability.sensitive !== true &&
+    !requiresManualAction &&
+    !hasConfirmationAttribute &&
+    !isSensitiveButton(button)
+  );
+}
+
+
+/*
+  Read pending action safely.
+*/
+function getPendingAction() {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = sessionStorage.getItem(PENDING_KEY);
+
+    if (!raw) return null;
+
+    const pending = JSON.parse(raw);
+
+    if (
+      !pending ||
+      typeof pending.query !== "string" ||
+      typeof pending.path !== "string"
+    ) {
+      sessionStorage.removeItem(PENDING_KEY);
+      return null;
+    }
+
+    if (
+      !pending.createdAt ||
+      Date.now() - pending.createdAt > PENDING_MAX_AGE
+    ) {
+      sessionStorage.removeItem(PENDING_KEY);
+      return null;
+    }
+
+    return pending;
+  } catch (error) {
+    console.error("Pending action error:", error);
+    sessionStorage.removeItem(PENDING_KEY);
+    return null;
+  }
+}
+
+export default function AISearchBar({
+  role,
+  pageCapabilities = [],
+}) {
   const navigate = useNavigate();
   const location = useLocation();
+
   const currentRole = String(role || "employee").toLowerCase();
 
   const [query, setQuery] = useState("");
@@ -133,34 +352,98 @@ export default function AISearchBar({ role }) {
   const [loading, setLoading] = useState(false);
   const [aiResponse, setAiResponse] = useState("");
   const [error, setError] = useState("");
-  const [, setDiscoveredCapabilities] = useState([]);
+  const [discoveredCapabilities, setDiscoveredCapabilities] = useState([]);
 
+  /*
+    Use route capabilities supplied by App.jsx.
+    No searchData.js or duplicate page catalogue.
+  */
+  const availablePages = useMemo(() => {
+    if (!Array.isArray(pageCapabilities)) return [];
+
+    return pageCapabilities.filter((item) => {
+      const allowedRoles = Array.isArray(item.roles)
+        ? item.roles.map((value) => String(value).toLowerCase())
+        : [];
+
+      return (
+        item &&
+        item.path &&
+        (!allowedRoles.length || allowedRoles.includes(currentRole))
+      );
+    });
+  }, [pageCapabilities, currentRole]);
+
+  /*
+    Automatically discover current page buttons.
+  */
   useEffect(() => {
     let stopObserving = () => {};
+    let cancelled = false;
+
     const startDiscovery = () => {
-      setDiscoveredCapabilities(discoverCurrentPage());
+      if (cancelled) return;
+
+      const initialButtons = discoverCurrentPage();
+
+setDiscoveredCapabilities(initialButtons);
+saveDiscoveredActions(initialButtons);
+
       stopObserving = observePageButtons((updatedButtons) => {
-        setDiscoveredCapabilities(updatedButtons);
-        console.log("Hourmaker AI: UI updated", updatedButtons);
+        if (!cancelled) {
+          setDiscoveredCapabilities(updatedButtons);
+          saveDiscoveredActions(updatedButtons);
+        }
       });
     };
+
     const timer = setTimeout(startDiscovery, 200);
+
     return () => {
+      cancelled = true;
       clearTimeout(timer);
       stopObserving();
     };
-  }, [location.pathname, location.search, location.key]);
+  }, [
+    location.pathname,
+    location.search,
+    location.key,
+  ]);
 
-  const meaningfulWords = normalize(query).split(/\s+/).filter((word) => word && !STOP_WORDS.includes(word));
-  const suggestions = (Array.isArray(searchData) ? searchData : [])
-    .filter((item) => {
-      const allowedRoles = (item.roles || []).map((itemRole) => String(itemRole).toLowerCase());
-      if (!allowedRoles.includes(currentRole) || meaningfulWords.length === 0) return false;
-      const searchableText = [item.title, item.description, ...(PAGE_ALIASES[item.title] || [])].join(" ");
-      const searchableWords = normalize(searchableText).split(/\s+/);
-      return meaningfulWords.every((queryWord) => searchableWords.some((word) => word.startsWith(queryWord)));
-    })
-    .slice(0, 5);
+  /*
+    Suggestions are generated from App.jsx route metadata.
+  */
+  const meaningfulWords = normalize(query)
+    .split(/\s+/)
+    .filter(
+      (word) => word && !STOP_WORDS.includes(word)
+    );
+
+  const suggestions = useMemo(() => {
+    if (!meaningfulWords.length) return [];
+
+    return availablePages
+      .filter((item) => {
+        const searchableText = normalize(
+          [
+            item.name,
+            item.title,
+            item.description,
+            item.pageTitle,
+            item.path,
+          ].filter(Boolean).join(" ")
+        );
+
+        const searchableWords = searchableText.split(/\s+/);
+
+        return meaningfulWords.every((queryWord) =>
+          searchableWords.some((word) =>
+            word.startsWith(queryWord)
+          )
+        );
+      })
+      .slice(0, 5);
+  }, [availablePages, meaningfulWords.join(" ")]);
 
   function clearSearch() {
     setQuery("");
@@ -175,183 +458,299 @@ export default function AISearchBar({ role }) {
     navigate(path);
   }
 
-  // Run a queued action after navigating to its target page.
+  /*
+    Execute a discovered action only after safety checks.
+  */
+  function executeAction(capability) {
+    const button = findDiscoveredButton(capability);
+
+    if (!canExecuteButton(button, capability)) {
+      setAiResponse(
+        capability?.sensitive || capability?.risk === "manual"
+          ? "This operation requires manual action."
+          : "The requested action is no longer available."
+      );
+
+      return false;
+    }
+
+    button.click();
+
+    setAiResponse(
+      `Clicked: ${capability.name || capability.label}`
+    );
+
+    return true;
+  }
+
+  /*
+    Continue a pending action after navigation.
+  */
   useEffect(() => {
     let cancelled = false;
 
     async function continuePendingAction() {
-      const raw = sessionStorage.getItem(PENDING_KEY);
-      if (!raw) return;
+      const pending = getPendingAction();
 
-      let pending;
-      try {
-        pending = JSON.parse(raw);
-      } catch {
+      if (!pending) return;
+
+      if (
+        pending.role &&
+        String(pending.role).toLowerCase() !== currentRole
+      ) {
         sessionStorage.removeItem(PENDING_KEY);
+        setAiResponse("This action is not available for your role.");
         return;
       }
 
-      if (!pending || typeof pending.query !== "string" || typeof pending.path !== "string") {
-        sessionStorage.removeItem(PENDING_KEY);
-        return;
-      }
-      if (pending.role && String(pending.role).toLowerCase() !== currentRole) {
-        sessionStorage.removeItem(PENDING_KEY);
-        setAiResponse("No result found.");
-        return;
-      }
-      if (location.pathname !== pending.path.split("?")[0]) return;
+      const targetPath = pending.path;
 
-      sessionStorage.removeItem(PENDING_KEY);
+const currentPath =
+  location.pathname + location.search;
+
+if (currentPath !== targetPath) return;
+
       setLoading(true);
       setAiResponse("");
       setError("");
 
       try {
         const discovered = await waitForDiscoveredButtons();
+
         if (cancelled) return;
+
         const capabilities = toButtonCapabilities(discovered);
+
         if (!capabilities.length) {
-          setAiResponse("No result found.");
+          sessionStorage.removeItem(PENDING_KEY);
+          setAiResponse("No actions were found on this page.");
           return;
         }
 
-        let selected = findExactActionMatch(pending.query, capabilities);
+        let selected = findExactActionMatch(
+          pending.query,
+          capabilities
+        );
+
         if (!selected) {
-          const result = await askAssistant(pending.query, capabilities, "action");
+          const result = await askAssistant(
+            pending.query,
+            capabilities,
+            "action"
+          );
+
           if (cancelled) return;
+
           selected = getSelectedCapability(result, capabilities);
-          if (!selected || !result.result || result.result.intent !== "action") {
-            setAiResponse("No result found.");
+
+          if (
+            !selected ||
+            !result.result ||
+            result.result.intent !== "action"
+          ) {
+            sessionStorage.removeItem(PENDING_KEY);
+            setAiResponse("No matching action was found.");
             return;
           }
         }
 
-        const button = findDiscoveredButton(selected);
-        if (!canExecuteButton(button, selected)) {
-          setAiResponse(selected.sensitive || selected.risk === "manual"
-            ? "This operation requires manual action."
-            : "The requested action is no longer available.");
-          return;
-        }
-        button.click();
-        setAiResponse(`Clicked: ${selected.name || selected.label}`);
+        sessionStorage.removeItem(PENDING_KEY);
+
+        executeAction(selected);
       } catch (err) {
-        console.error("Button discovery error:", err);
-        if (!cancelled) setError(err.message || "Unable to complete the action.");
+        console.error("Pending action error:", err);
+
+        if (!cancelled) {
+          setError(err.message || "Unable to complete the action.");
+        }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 
-    const timer = setTimeout(continuePendingAction, 200);
+    const timer = setTimeout(continuePendingAction, 300);
+
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [location.pathname, location.search, location.key, currentRole]);
+  }, [
+    location.pathname,
+    location.search,
+    location.key,
+    currentRole,
+  ]);
 
+  /*
+    Main search flow:
+    1. Check current page actions.
+    2. Ask NVIDIA to select a current page action.
+    3. Ask NVIDIA to select a destination route.
+    4. Navigate or queue an action for the destination page.
+  */
   async function handleSearch(event) {
     event.preventDefault();
+
     const searchTerm = query.trim();
+
     if (!searchTerm || loading) return;
 
     setShowSuggestions(false);
     setAiResponse("");
     setError("");
     setLoading(true);
+
     sessionStorage.removeItem(PENDING_KEY);
 
     try {
       const discovered = await waitForDiscoveredButtons();
       const capabilities = toButtonCapabilities(discovered);
-      console.log("Current page discovered actions:", capabilities);
 
-      // First: exact/word match on the current page. This prevents a wrong tab
-      // such as Statistics being clicked for a Generate Report request.
-      const directMatch = findExactActionMatch(searchTerm, capabilities);
+      console.log(
+        "Hourmaker AI: Current page actions",
+        capabilities
+      );
+
+      // STEP 1: Direct action match.
+      const directMatch = findExactActionMatch(
+        searchTerm,
+        capabilities
+      );
+
       if (directMatch) {
-        const button = findDiscoveredButton(directMatch);
-        if (!canExecuteButton(button, directMatch)) {
-          setAiResponse(directMatch.sensitive || directMatch.risk === "manual"
-            ? "This operation requires manual action."
-            : "The matching button is no longer available.");
-          return;
-        }
-        button.click();
-        setAiResponse(`Clicked: ${directMatch.name || directMatch.label}`);
+        executeAction(directMatch);
         return;
       }
 
-      // Second: let NVIDIA select a current-page action if there is no unique
-      // direct match.
+// STEP 2: Search previously discovered actions
+// from all visited pages.
+const registeredAction = findRegisteredAction(searchTerm);
+
+
+if (registeredAction) {
+  const currentPage =
+    location.pathname + location.search;
+
+  if (registeredAction.page !== currentPage) {
+    // Remove any old pending auto-execution request.
+    sessionStorage.removeItem(PENDING_KEY);
+
+    setQuery("");
+    setShowSuggestions(false);
+
+    setAiResponse(
+      `Navigating to ${registeredAction.pageTitle || "the relevant page"}...`
+    );
+
+    navigate(registeredAction.page);
+    return;
+  }
+}
+
+
+
+      // STEP 2: Ask NVIDIA to identify a current page action.
       if (capabilities.length > 0) {
-        const actionResult = await askAssistant(searchTerm, capabilities, "action");
-        const selectedAction = getSelectedCapability(actionResult, capabilities);
-        if (selectedAction && actionResult.result && actionResult.result.intent === "action") {
-          const button = findDiscoveredButton(selectedAction);
-          if (!canExecuteButton(button, selectedAction)) {
-            setAiResponse(selectedAction.sensitive || selectedAction.risk === "manual"
-              ? "This operation requires manual action."
-              : "The requested action is no longer available.");
-            return;
-          }
-          button.click();
-          setAiResponse(`Clicked: ${selectedAction.name || selectedAction.label}`);
-          return;
-        }
+        const actionResult = await askAssistant(
+          searchTerm,
+          capabilities,
+          "action"
+        );
+
+        const selectedAction = getSelectedCapability(
+          actionResult,
+          capabilities
+        );
+
+        if (
+  selectedAction &&
+  actionResult.result &&
+  actionResult.result.intent === "action" &&
+  isRelevantAction(searchTerm, selectedAction)
+) {
+  executeAction(selectedAction);
+  return;
+}
       }
 
-      // Third: fall back to page navigation.
-      const pageCapabilities = (Array.isArray(searchData) ? searchData : [])
-        .filter((item) => (item.roles || []).some((itemRole) => String(itemRole).toLowerCase() === currentRole))
-        .map((item) => ({
-          id: `page:${item.id}`,
-          name: item.title,
-          description: item.description || "",
-          type: "page",
-          category: "navigation",
-          page: item.path,
-          pageTitle: item.title,
-          path: item.path,
-        }));
-
-      if (!pageCapabilities.length) {
-        setAiResponse("No result found.");
+      // STEP 3: Use route metadata supplied by App.jsx.
+      if (!availablePages.length) {
+        setAiResponse("No pages are available for your role.");
         return;
       }
 
-      const routeResult = await askAssistant(searchTerm, pageCapabilities, "route");
-      const selectedPage = getSelectedCapability(routeResult, pageCapabilities);
-      if (!selectedPage || !selectedPage.path || !routeResult.result) {
-        setAiResponse("No result found.");
+      const routeResult = await askAssistant(
+        searchTerm,
+        availablePages,
+        "route"
+      );
+
+      const selectedPage = getSelectedCapability(
+        routeResult,
+        availablePages
+      );
+
+      if (
+        !selectedPage ||
+        !selectedPage.path ||
+        !routeResult.result
+      ) {
+        setAiResponse(
+          routeResult.answer || "No matching page or action found."
+        );
         return;
       }
 
-      if (routeResult.result.intent === "navigate") {
-        clearSearch();
-        navigate(selectedPage.path, { state: { aiNavigation: Date.now() } });
-        return;
-      }
+      const intent = routeResult.result.intent;
 
-      if (routeResult.result.intent === "action") {
-        sessionStorage.setItem(PENDING_KEY, JSON.stringify({
-          query: searchTerm,
-          path: selectedPage.path,
-          role: currentRole,
-          createdAt: Date.now(),
-        }));
-        setQuery("");
-        setShowSuggestions(false);
-        setAiResponse(`Opening ${selectedPage.name} to find the requested action...`);
-        navigate(selectedPage.path, { state: { aiActionDiscovery: Date.now() } });
-        return;
-      }
+      // STEP 4: Normal page navigation.
+     
+const isDirectPageRequest = isPageNameQuery(
+  searchTerm,
+  selectedPage
+);
 
-      setAiResponse("No result found.");
+// Normal page request: navigate without clicking a button.
+if (isDirectPageRequest) {
+  sessionStorage.removeItem(PENDING_KEY);
+  clearSearch();
+
+  navigate(selectedPage.path);
+  return;
+}
+
+// Section/action request: navigate first, then discover
+// and select the matching button on the destination page.
+sessionStorage.setItem(
+  PENDING_KEY,
+  JSON.stringify({
+    query: searchTerm,
+    path: selectedPage.path,
+    role: currentRole,
+    createdAt: Date.now()
+  })
+);
+
+setQuery("");
+setShowSuggestions(false);
+
+setAiResponse(
+  `Opening ${selectedPage.name || selectedPage.title} to find the requested section...`
+);
+
+navigate(selectedPage.path);
+return;
+
+
+      setAiResponse("No matching page or action found.");
     } catch (err) {
       console.error("Hourmaker AI search error:", err);
-      setError(err.message || "Unable to connect to Hourmaker AI.");
+
+      setError(
+        err.message || "Unable to connect to Hourmaker AI."
+      );
     } finally {
       setLoading(false);
     }
@@ -366,24 +765,41 @@ export default function AISearchBar({ role }) {
 
   return (
     <div className="ai-search-container">
-      <form className="ai-search-form" onSubmit={handleSearch}>
+      <form
+        className="ai-search-form"
+        onSubmit={handleSearch}
+      >
         <span className="search-icon">✧</span>
+
         <input
           type="text"
           placeholder="Ask Hourmaker AI or search your workspace..."
           value={query}
           onChange={handleChange}
           onFocus={() => {
-            if (query.trim()) setShowSuggestions(true);
+            if (query.trim()) {
+              setShowSuggestions(true);
+            }
           }}
           disabled={loading}
         />
+
         {query && (
-          <button type="button" className="search-clear-button" onClick={clearSearch} aria-label="Clear search">
+          <button
+            type="button"
+            className="search-clear-button"
+            onClick={clearSearch}
+            aria-label="Clear search"
+          >
             ✕
           </button>
         )}
-        <button type="submit" className="unified-search-button" disabled={loading || !query.trim()}>
+
+        <button
+          type="submit"
+          className="unified-search-button"
+          disabled={loading || !query.trim()}
+        >
           {loading ? "Searching..." : "Search"}
         </button>
       </form>
@@ -392,16 +808,29 @@ export default function AISearchBar({ role }) {
         <div className="search-suggestions">
           {suggestions.length > 0 ? (
             suggestions.map((item) => (
-              <button type="button" className="suggestion-item" key={item.id} onClick={() => openPage(item.path)}>
+              <button
+                type="button"
+                className="suggestion-item"
+                key={item.id}
+                onClick={() => openPage(item.path)}
+              >
                 <span className="suggestion-icon">⌕</span>
+
                 <span>
-                  <strong>{item.title}</strong>
-                  <small>{item.description}</small>
+                  <strong>
+                    {item.name || item.title || item.pageTitle}
+                  </strong>
+
+                  <small>
+                    {item.description || item.path}
+                  </small>
                 </span>
               </button>
             ))
           ) : (
-            <div className="no-suggestions">No direct suggestions. Press Search to ask Hourmaker AI.</div>
+            <div className="no-suggestions">
+              No direct suggestions. Press Search to ask Hourmaker AI.
+            </div>
           )}
         </div>
       )}
@@ -409,8 +838,12 @@ export default function AISearchBar({ role }) {
       {(aiResponse || error) && (
         <div className="ai-answer ai-response">
           <h3>✧ Hourmaker AI</h3>
+
           {aiResponse && <p>{aiResponse}</p>}
-          {error && <p className="search-error">{error}</p>}
+
+          {error && (
+            <p className="search-error">{error}</p>
+          )}
         </div>
       )}
 
@@ -418,8 +851,12 @@ export default function AISearchBar({ role }) {
         <div className="ai-loading-overlay">
           <div className="ai-loading-card">
             <div className="ai-loading-spinner" />
+
             <h3>Hourmaker AI is thinking...</h3>
-            <p>Understanding your request and discovering available actions.</p>
+
+            <p>
+              Understanding your request and discovering available actions.
+            </p>
           </div>
         </div>
       )}

@@ -2,10 +2,8 @@
 /*
   src/components/autoDiscovery.js
 
-  Automatically discovers buttons and action links on the
-  currently rendered Hourmaker page.
-
-  No manual button registration is required.
+  Automatically discovers visible buttons and action links
+  on the currently rendered Hourmaker page.
 */
 
 const ELEMENT_ID_ATTRIBUTE = "data-hourmaker-ai-id";
@@ -15,11 +13,9 @@ const elementIds = new WeakMap();
 
 let nextElementId = 1;
 
-// --------------------------------------------------
-// GET MAIN PAGE CONTENT
-// --------------------------------------------------
-
 function getMainContent() {
+  if (typeof document === "undefined") return null;
+
   return (
     document.querySelector(".main-content") ||
     document.querySelector("#main-content") ||
@@ -29,32 +25,24 @@ function getMainContent() {
   );
 }
 
-// --------------------------------------------------
-// GET BUTTON LABEL
-// --------------------------------------------------
-
 function getElementLabel(element) {
   if (!element) return "";
 
   const ariaLabel = element.getAttribute("aria-label");
   const title = element.getAttribute("title");
-
-  const text =
-    element.innerText ||
-    element.textContent ||
-    "";
+  const text = element.innerText || element.textContent || "";
 
   return String(ariaLabel || title || text)
     .replace(/\s+/g, " ")
     .trim();
 }
 
-// --------------------------------------------------
-// CHECK VISIBILITY
-// --------------------------------------------------
-
-function isVisible(element) {
-  if (!element || !element.isConnected) {
+export function isVisible(element) {
+  if (
+    !element ||
+    !element.isConnected ||
+    typeof window === "undefined"
+  ) {
     return false;
   }
 
@@ -63,7 +51,8 @@ function isVisible(element) {
   if (
     style.display === "none" ||
     style.visibility === "hidden" ||
-    style.opacity === "0"
+    style.opacity === "0" ||
+    element.hidden
   ) {
     return false;
   }
@@ -71,25 +60,48 @@ function isVisible(element) {
   return element.getClientRects().length > 0;
 }
 
-// --------------------------------------------------
-// CHECK DISABLED STATE
-// --------------------------------------------------
-
 function isDisabled(element) {
-  return (
+  return Boolean(
     element.disabled === true ||
     element.getAttribute("aria-disabled") === "true"
   );
 }
 
-// --------------------------------------------------
-// DETECT SENSITIVE ACTIONS
-// --------------------------------------------------
+function getDeclaredRisk(element) {
+  const risk = String(
+    element.getAttribute("data-ai-risk") || ""
+  ).toLowerCase();
 
+  const requiresConfirmation =
+    element.getAttribute("data-ai-confirm") === "true" ||
+    element.getAttribute("data-ai-sensitive") === "true";
+
+  if (
+    requiresConfirmation ||
+    ["high", "confirm", "manual", "critical"].includes(risk)
+  ) {
+    return "manual";
+  }
+
+  if (["low", "normal"].includes(risk)) {
+    return risk;
+  }
+
+  return null;
+}
+
+/*
+  Sensitive actions must never be auto-clicked.
+*/
 export function isSensitiveButton(element) {
   if (!element) return false;
 
-  const label = getElementLabel(element).toLowerCase();
+  const label = [
+    getElementLabel(element),
+    element.getAttribute("data-ai-description") || ""
+  ]
+    .join(" ")
+    .toLowerCase();
 
   const sensitivePatterns = [
     "delete",
@@ -117,40 +129,52 @@ export function isSensitiveButton(element) {
     "archive"
   ];
 
-  return sensitivePatterns.some(function (word) {
-    return label.includes(word);
-  });
+  return sensitivePatterns.some((pattern) =>
+    label.includes(pattern)
+  );
 }
 
-// --------------------------------------------------
-// GET ELIGIBLE BUTTONS AND LINKS
-// --------------------------------------------------
+function getRisk(element) {
+  const declaredRisk = getDeclaredRisk(element);
+
+  if (declaredRisk === "manual") return "manual";
+
+  if (isSensitiveButton(element)) return "manual";
+
+  return declaredRisk || "normal";
+}
 
 function getEligibleButtons() {
   const container = getMainContent();
 
-  if (!container) {
-    console.warn(
-      "Hourmaker AI: Main content container not found."
-    );
-
-    return [];
-  }
+  if (!container) return [];
 
   const elements = Array.from(
     container.querySelectorAll(
-      'button, [role="button"], a[href]'
+      [
+        "button",
+        '[role="button"]',
+        "a[href]",
+        'input[type="button"]',
+        'input[type="submit"]'
+      ].join(",")
     )
   );
 
-  return elements.filter(function (element) {
+  return elements.filter((element) => {
+    const ignored = element.closest(
+      [
+        ".topbar",
+        ".navbar",
+        ".sidebar",
+        ".ai-search-container",
+        "[data-ai-ignore]",
+        '[aria-hidden="true"]'
+      ].join(",")
+    );
+
     return (
-      !element.closest(".topbar") &&
-      !element.closest(".navbar") &&
-      !element.closest(".sidebar") &&
-      !element.closest(".ai-search-container") &&
-      !element.closest("[data-ai-ignore]") &&
-      !element.closest('[aria-hidden="true"]') &&
+      !ignored &&
       !isDisabled(element) &&
       isVisible(element) &&
       getElementLabel(element).length > 0
@@ -158,144 +182,148 @@ function getEligibleButtons() {
   });
 }
 
-// --------------------------------------------------
-// CREATE STABLE ELEMENT ID
-// --------------------------------------------------
-
 function getElementId(element) {
-  let id = elementIds.get(element);
+  const existingId = elementIds.get(element);
+
+  if (existingId) return existingId;
+
+  const declaredId = element.getAttribute("data-ai-action-id");
+
+  let id = declaredId
+    ? `action-${declaredId}`
+    : element.getAttribute(ELEMENT_ID_ATTRIBUTE);
+
+  // Ensure the same ID is not assigned to two DOM elements.
+  if (id && discoveredElements.has(id)) {
+    const existingElement = discoveredElements.get(id);
+
+    if (existingElement !== element) {
+      id = null;
+    }
+  }
 
   if (!id) {
-    id = element.getAttribute(ELEMENT_ID_ATTRIBUTE);
-
-    if (!id) {
-      id = "hourmaker-action-" + nextElementId++;
-
-      element.setAttribute(
-        ELEMENT_ID_ATTRIBUTE,
-        id
-      );
-    }
-
-    elementIds.set(element, id);
+    id = `hourmaker-action-${nextElementId++}`;
   }
+
+  element.setAttribute(ELEMENT_ID_ATTRIBUTE, id);
+  elementIds.set(element, id);
 
   return id;
 }
 
-// --------------------------------------------------
-// DISCOVER CURRENT PAGE BUTTONS
-// --------------------------------------------------
-
+/*
+  Discover all eligible actions on the current page.
+*/
 export function discoverCurrentPage() {
-  if (typeof document === "undefined") {
-    return [];
-  }
+  if (typeof document === "undefined") return [];
 
   const elements = getEligibleButtons();
+  const currentIds = new Set();
 
-  const capabilities = elements.map(function (element) {
+  const capabilities = elements.map((element) => {
     const id = getElementId(element);
     const label = getElementLabel(element);
-
     const sensitive = isSensitiveButton(element);
 
+    currentIds.add(id);
     discoveredElements.set(id, element);
 
     return {
-      id: id,
+      id,
       name: label,
-      label: label,
+      label,
+
       description:
+        element.getAttribute("data-ai-description") ||
         element.getAttribute("title") ||
         element.getAttribute("aria-label") ||
         label,
 
       type: "action",
-      category: "ui-action",
 
-      page: window.location.pathname,
-      pageTitle: document.title,
+      category:
+        element.getAttribute("data-ai-category") ||
+        "ui-action",
 
-      risk: sensitive ? "manual" : "normal",
-      sensitive: sensitive,
+      page: window.location.pathname + window.location.search,
+      pageTitle:
+        document.querySelector("h1")?.innerText ||
+        document.title,
+
+      risk: getRisk(element),
+      sensitive,
 
       enabled: !isDisabled(element),
-      visible: isVisible(element)
+      visible: isVisible(element),
+
+      elementTag: element.tagName.toLowerCase(),
+
+      href:
+        element.tagName.toLowerCase() === "A"
+          ? element.getAttribute("href")
+          : null
     };
   });
 
-  // Remove disconnected elements from the lookup map.
-  discoveredElements.forEach(function (element, id) {
-    if (!element || !element.isConnected) {
+  // Remove stale elements, including elements hidden or removed
+  // after a React page update.
+  discoveredElements.forEach((element, id) => {
+    if (!element?.isConnected || !currentIds.has(id)) {
       discoveredElements.delete(id);
     }
   });
 
-  console.log(
-    "Hourmaker AI: Discovered actions:",
-    capabilities
-  );
-
   return capabilities;
 }
 
-// --------------------------------------------------
-// FIND ACTUAL DOM BUTTON FROM AI SELECTION
-// --------------------------------------------------
-
+/*
+  Get the real DOM element selected by the AI.
+*/
 export function findDiscoveredButton(selected) {
-  if (!selected || !selected.id) {
-    return null;
-  }
+  if (!selected?.id) return null;
 
   const element = discoveredElements.get(selected.id);
 
-  if (!element || !element.isConnected) {
+  if (!element || !element.isConnected || !isVisible(element)) {
     return null;
   }
 
   return element;
 }
 
-// --------------------------------------------------
-// AUTOMATICALLY WATCH FOR NEW BUTTONS
-// --------------------------------------------------
-
+/*
+  Observe dynamic React page changes and rediscover actions.
+*/
 export function observePageButtons(callback) {
   if (typeof document === "undefined") {
-    return function () {};
+    return () => {};
   }
 
   if (typeof callback !== "function") {
     console.error(
       "Hourmaker AI: Observer callback must be a function."
     );
-
-    return function () {};
+    return () => {};
   }
 
   const container = getMainContent();
 
   if (!container) {
-    console.warn(
-      "Hourmaker AI: Cannot observe page buttons."
-    );
-
-    return function () {};
+    console.warn("Hourmaker AI: Main content not found.");
+    return () => {};
   }
 
-  // Initial discovery
   callback(discoverCurrentPage());
 
   let updateTimeout = null;
 
-  const observer = new MutationObserver(function () {
+  const observer = new MutationObserver(() => {
     if (updateTimeout) {
       clearTimeout(updateTimeout);
     }
 
-    updateTimeout = setTimeout(function () {
+    updateTimeout = setTimeout(() => {
       callback(discoverCurrentPage());
     }, 150);
   });
@@ -311,11 +339,17 @@ export function observePageButtons(callback) {
       "title",
       "class",
       "style",
-      "hidden"
+      "hidden",
+      "href",
+      "data-ai-action-id",
+      "data-ai-description",
+      "data-ai-category",
+      "data-ai-risk",
+      "data-ai-confirm",
+      "data-ai-sensitive"
     ]
   });
 
-  // Cleanup function
   return function stopObserving() {
     observer.disconnect();
 

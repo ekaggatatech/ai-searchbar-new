@@ -1,13 +1,20 @@
-import { CapabilityProvider } from "./context/CapabilityRegistry";
-import { useState } from "react";
+
+import { useMemo, useState } from "react";
 
 import {
   BrowserRouter,
   Routes,
   Route,
   Link,
+  Navigate,
   useSearchParams,
+  useRoutes,
 } from "react-router-dom";
+
+import { CapabilityProvider } from "./context/CapabilityRegistry";
+import { RouteCatalogProvider } from "./context/RouteCatalogContext";
+
+import { useRouteCatalog } from "./context/RouteCatalogContext";
 
 import AISearchBar from "./components/AISearchBar";
 
@@ -50,6 +57,9 @@ function Layout({ children }) {
   // Demo role. Replace with authenticated user role later.
   const currentRole = "manager";
 
+  // Routes are supplied by the React Router configuration.
+  const pageCapabilities = useRouteCatalog();
+
   return (
     <div className="app-layout">
       <aside className="sidebar">
@@ -70,7 +80,10 @@ function Layout({ children }) {
             <p>Manage your workspace</p>
           </div>
 
-          <AISearchBar role={currentRole} />
+          <AISearchBar
+            role={currentRole}
+            pageCapabilities={pageCapabilities}
+          />
         </header>
 
         {children}
@@ -121,9 +134,7 @@ function Dashboard() {
   ];
 
   function selectSection(value) {
-    setParams(
-      value === "overview" ? {} : { section: value }
-    );
+    setParams(value === "overview" ? {} : { section: value });
   }
 
   return (
@@ -165,9 +176,11 @@ function Dashboard() {
 
           <div className="content-card">
             <h2>Dashboard Overview</h2>
+
             <p>
               Choose a dashboard section above to explore more details.
             </p>
+
             <button
               type="button"
               className="primary-button"
@@ -182,6 +195,13 @@ function Dashboard() {
             >
               Generate Report
             </button>
+            <button
+  type="button"
+  className="primary-button"
+  onClick={() => alert("Export started successfully!")}
+>
+  Export Data
+</button>
           </div>
         </>
       )}
@@ -312,8 +332,6 @@ function TeamPage({ members, setMembers }) {
     (member) => member.id === Number(selectedId)
   );
 
-  // Open employee edit form
-
   function startEdit(member) {
     setSelectedId(member.id);
     setEditName(member.name);
@@ -321,8 +339,6 @@ function TeamPage({ members, setMembers }) {
 
     selectSection("edit");
   }
-
-  // Save employee details
 
   function saveMember(event) {
     event.preventDefault();
@@ -368,8 +384,6 @@ function TeamPage({ members, setMembers }) {
     selectSection("list");
   }
 
-  // Remove employee
-
   function removeMember(id) {
     const confirmed = window.confirm(
       "Are you sure you want to remove this member?"
@@ -387,8 +401,6 @@ function TeamPage({ members, setMembers }) {
       setEditEmail("");
     }
   }
-
-  // Activate / Deactivate employee
 
   function toggleStatus(id) {
     setMembers((previous) =>
@@ -470,8 +482,7 @@ function TeamPage({ members, setMembers }) {
             value={selectedId}
             onChange={(event) => {
               const member = members.find(
-                (item) =>
-                  item.id === Number(event.target.value)
+                (item) => item.id === Number(event.target.value)
               );
 
               setSelectedId(event.target.value);
@@ -526,6 +537,7 @@ function TeamPage({ members, setMembers }) {
               >
                 Save Changes
               </button>
+              
             </form>
           )}
         </div>
@@ -618,6 +630,7 @@ function TeamPage({ members, setMembers }) {
           >
             View Members List
           </button>
+          
         </div>
       )}
     </Layout>
@@ -872,7 +885,6 @@ function SettingsPage() {
       />
 
       <div className="content-card">
-
         {/* EDIT PROFILE */}
 
         {section === "profile" && (
@@ -1062,62 +1074,168 @@ function NotFound() {
   );
 }
 
+function getRouteTitle(path) {
+  const segments = path
+    .split("/")
+    .filter(Boolean);
+
+  if (!segments.length) return "Home";
+
+  return segments
+    .map((segment) =>
+      segment
+        .replace(/[-_]/g, " ")
+        .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    )
+    .join(" ");
+}
+
+// --------------------------------------------------
+// ROUTE CONFIGURATION
+// Single source of truth for pages and AI navigation.
+// --------------------------------------------------
+
+function AppRoutes() {
+  const [members, setMembers] = useState(initialMembers);
+
+  const routes = useMemo(
+    () => [
+      {
+        path: "/",
+        element: <Navigate to="/dashboard" replace />,
+      },
+      {
+        path: "/dashboard",
+        element: <Dashboard />,
+        handle: {
+          ai: {
+            id: "page-dashboard",
+            title: "Dashboard",
+            description:
+              "View workspace overview, employee statistics, recent activity and dashboard reports.",
+            roles: ["manager", "admin"],
+          },
+        },
+      },
+      {
+        path: "/team",
+        element: (
+          <TeamPage
+            members={members}
+            setMembers={setMembers}
+          />
+        ),
+        handle: {
+          ai: {
+            id: "page-team",
+            title: "Team Management",
+            description:
+              "View, search, edit and manage team members and employee status.",
+            roles: ["manager", "admin"],
+          },
+        },
+      },
+      {
+        path: "/team/invite",
+        element: (
+          <InvitePage
+            members={members}
+            setMembers={setMembers}
+          />
+        ),
+        handle: {
+          ai: {
+            id: "page-invite",
+            title: "Invite Member",
+            description:
+              "Create an invitation and add a new member to the workspace.",
+            roles: ["manager", "admin"],
+          },
+        },
+      },
+      {
+        path: "/settings",
+        element: <SettingsPage />,
+        handle: {
+          ai: {
+            id: "page-settings",
+            title: "Account Settings",
+            description:
+              "Manage profile details, email notifications, theme preferences and account settings.",
+            roles: ["manager", "admin", "employee"],
+          },
+        },
+      },
+      {
+        path: "/billing",
+        element: <BillingPage />,
+        handle: {
+          ai: {
+            id: "page-billing",
+            title: "Billing and Payments",
+            description:
+              "View subscription information and manage the workspace plan.",
+            roles: ["manager", "admin"],
+          },
+        },
+      },
+      {
+        path: "*",
+        element: <NotFound />,
+      },
+    ],
+    [members]
+  );
+
+  // Build AI page capabilities from the same route configuration.
+  
+const pageCapabilities = useMemo(
+  () =>
+    routes
+      .filter(
+        (route) =>
+          route.path &&
+          route.path !== "/" &&
+          route.path !== "*" &&
+          route.element
+      )
+      .map((route) => {
+        const title = getRouteTitle(route.path);
+
+        return {
+          id: `page-${route.path.replace(/[^a-zA-Z0-9]+/g, "-")}`,
+          name: title,
+          title,
+          description: `${title} page. Route: ${route.path}`,
+          path: route.path,
+          page: route.path,
+          pageTitle: title,
+          type: "page",
+          category: "navigation"
+        };
+      }),
+  [routes]
+);
+
+
+  const currentRoutes = useRoutes(routes);
+
+  return (
+    <RouteCatalogProvider capabilities={pageCapabilities}>
+      {currentRoutes}
+    </RouteCatalogProvider>
+  );
+}
+
 // --------------------------------------------------
 // MAIN APPLICATION
 // --------------------------------------------------
 
 export default function App() {
-  const [members, setMembers] = useState(initialMembers);
-
   return (
     <CapabilityProvider>
       <BrowserRouter>
-        <Routes>
-          <Route
-            path="/"
-            element={<Dashboard />}
-          />
-
-          <Route
-            path="/dashboard"
-            element={<Dashboard />}
-          />
-
-          <Route
-            path="/team"
-            element={
-              <TeamPage
-                members={members}
-                setMembers={setMembers}
-              />
-            }
-          />
-
-          <Route
-            path="/team/invite"
-            element={
-              <InvitePage
-                members={members}
-                setMembers={setMembers}
-              />
-            }
-          />
-
-          <Route
-            path="/settings"
-            element={<SettingsPage />}
-          />
-
-          <Route
-            path="/billing"
-            element={<BillingPage />}
-          />
-
-          <Route
-            path="*"
-            element={<NotFound />}
-          />
-        </Routes>
+        <AppRoutes />
       </BrowserRouter>
     </CapabilityProvider>
   );
