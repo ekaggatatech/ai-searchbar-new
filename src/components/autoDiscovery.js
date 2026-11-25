@@ -4,6 +4,11 @@
 
   Automatically discovers visible buttons and action links
   on the currently rendered Hourmaker page.
+
+  Safety:
+  - Discovery only reads and describes visible controls.
+  - This module never clicks or executes discovered controls.
+  - The user must explicitly click a page control to execute it.
 */
 
 const ELEMENT_ID_ATTRIBUTE = "data-hourmaker-ai-id";
@@ -12,6 +17,10 @@ const discoveredElements = new Map();
 const elementIds = new WeakMap();
 
 let nextElementId = 1;
+
+/* -----------------------------------------
+   Get main page content
+----------------------------------------- */
 
 function getMainContent() {
   if (typeof document === "undefined") return null;
@@ -25,7 +34,11 @@ function getMainContent() {
   );
 }
 
-function getElementLabel(element) {
+/* -----------------------------------------
+   Get button label
+----------------------------------------- */
+
+export function getElementLabel(element) {
   if (!element) return "";
 
   const ariaLabel = element.getAttribute("aria-label");
@@ -36,6 +49,10 @@ function getElementLabel(element) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+/* -----------------------------------------
+   Check visibility
+----------------------------------------- */
 
 export function isVisible(element) {
   if (
@@ -60,12 +77,20 @@ export function isVisible(element) {
   return element.getClientRects().length > 0;
 }
 
-function isDisabled(element) {
+/* -----------------------------------------
+   Check disabled state
+----------------------------------------- */
+
+export function isDisabled(element) {
   return Boolean(
     element.disabled === true ||
     element.getAttribute("aria-disabled") === "true"
   );
 }
+
+/* -----------------------------------------
+   Read manually declared risk
+----------------------------------------- */
 
 function getDeclaredRisk(element) {
   const risk = String(
@@ -90,15 +115,41 @@ function getDeclaredRisk(element) {
   return null;
 }
 
-/*
-  Sensitive actions must never be auto-clicked.
-*/
+/* -----------------------------------------
+   Check sensitive actions
+----------------------------------------- */
+
 export function isSensitiveButton(element) {
   if (!element) return false;
 
+  const category = String(
+    element.getAttribute("data-ai-category") || ""
+  ).toLowerCase();
+
+  const actionId = String(
+    element.getAttribute("data-ai-action-id") || ""
+  ).toLowerCase();
+
+  const description = String(
+    element.getAttribute("data-ai-description") || ""
+  ).toLowerCase();
+
+  // Allow section navigation even if its label contains
+  // words like Remove, Edit, or Delete.
+  const isSectionNavigation =
+    category === "navigation" &&
+    (
+      actionId.startsWith("section-") ||
+      /open the .* section/.test(description)
+    );
+
+  if (isSectionNavigation) {
+    return false;
+  }
+
   const label = [
     getElementLabel(element),
-    element.getAttribute("data-ai-description") || ""
+    description
   ]
     .join(" ")
     .toLowerCase();
@@ -134,15 +185,29 @@ export function isSensitiveButton(element) {
   );
 }
 
+/* -----------------------------------------
+   Calculate action risk
+----------------------------------------- */
+
 function getRisk(element) {
   const declaredRisk = getDeclaredRisk(element);
 
-  if (declaredRisk === "manual") return "manual";
+  // Explicit manual risk always takes priority.
+  if (declaredRisk === "manual") {
+    return "manual";
+  }
 
-  if (isSensitiveButton(element)) return "manual";
+  // Automatically protect sensitive actions.
+  if (isSensitiveButton(element)) {
+    return "manual";
+  }
 
   return declaredRisk || "normal";
 }
+
+/* -----------------------------------------
+   Get eligible buttons and links
+----------------------------------------- */
 
 function getEligibleButtons() {
   const container = getMainContent();
@@ -182,25 +247,22 @@ function getEligibleButtons() {
   });
 }
 
+/* -----------------------------------------
+   Generate unique element ID
+----------------------------------------- */
+
 function getElementId(element) {
   const existingId = elementIds.get(element);
 
-  if (existingId) return existingId;
+  if (existingId) {
+    return existingId;
+  }
 
   const declaredId = element.getAttribute("data-ai-action-id");
 
   let id = declaredId
-    ? `action-${declaredId}`
+    ? String(declaredId).trim()
     : element.getAttribute(ELEMENT_ID_ATTRIBUTE);
-
-  // Ensure the same ID is not assigned to two DOM elements.
-  if (id && discoveredElements.has(id)) {
-    const existingElement = discoveredElements.get(id);
-
-    if (existingElement !== element) {
-      id = null;
-    }
-  }
 
   if (!id) {
     id = `hourmaker-action-${nextElementId++}`;
@@ -212,11 +274,14 @@ function getElementId(element) {
   return id;
 }
 
-/*
-  Discover all eligible actions on the current page.
-*/
+/* -----------------------------------------
+   Discover current page actions
+----------------------------------------- */
+
 export function discoverCurrentPage() {
-  if (typeof document === "undefined") return [];
+  if (typeof document === "undefined") {
+    return [];
+  }
 
   const elements = getEligibleButtons();
   const currentIds = new Set();
@@ -228,9 +293,13 @@ export function discoverCurrentPage() {
 
     currentIds.add(id);
     discoveredElements.set(id, element);
+    if (!id.startsWith("action-")) {
+      discoveredElements.set(`action-${id}`, element);
+    }
 
     return {
       id,
+
       name: label,
       label,
 
@@ -246,7 +315,10 @@ export function discoverCurrentPage() {
         element.getAttribute("data-ai-category") ||
         "ui-action",
 
-      page: window.location.pathname + window.location.search,
+      page:
+        element.getAttribute("data-ai-path") ||
+        (window.location.pathname + window.location.search),
+
       pageTitle:
         document.querySelector("h1")?.innerText ||
         document.title,
@@ -260,16 +332,15 @@ export function discoverCurrentPage() {
       elementTag: element.tagName.toLowerCase(),
 
       href:
-        element.tagName.toLowerCase() === "A"
+        element.tagName.toLowerCase() === "a"
           ? element.getAttribute("href")
           : null
     };
   });
 
-  // Remove stale elements, including elements hidden or removed
-  // after a React page update.
+  // Remove stale or disconnected DOM elements.
   discoveredElements.forEach((element, id) => {
-    if (!element?.isConnected || !currentIds.has(id)) {
+    if (!element?.isConnected) {
       discoveredElements.delete(id);
     }
   });
@@ -277,24 +348,100 @@ export function discoverCurrentPage() {
   return capabilities;
 }
 
-/*
-  Get the real DOM element selected by the AI.
-*/
+/* -----------------------------------------
+   Find selected DOM element
+   Resilient lookup by ID, attributes, or label
+----------------------------------------- */
+
 export function findDiscoveredButton(selected) {
-  if (!selected?.id) return null;
+  if (!selected) return null;
 
-  const element = discoveredElements.get(selected.id);
+  const rawId = String(selected.id || "").trim();
+  const cleanId = rawId
+    .replace(/^action:/, "")
+    .replace(/.*::/, "")
+    .replace(/^action-/, "");
 
-  if (!element || !element.isConnected || !isVisible(element)) {
-    return null;
+  // 1. Try Map lookup with various key shapes
+  const candidates = [
+    rawId,
+    cleanId,
+    `action-${cleanId}`,
+    `action:${cleanId}`,
+    selected.actionId,
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const el = discoveredElements.get(candidate);
+    if (el && el.isConnected && isVisible(el)) {
+      return el;
+    }
   }
 
-  return element;
+  // 2. Try direct DOM query by data attributes
+  if (cleanId) {
+    const domEl =
+      document.querySelector(`[data-ai-action-id="${cleanId}"]`) ||
+      document.querySelector(`[data-ai-action-id="action-${cleanId}"]`) ||
+      document.querySelector(`[data-hourmaker-ai-id="${cleanId}"]`) ||
+      document.querySelector(`[data-hourmaker-ai-id="action-${cleanId}"]`) ||
+      document.querySelector(`#${cleanId}`);
+
+    if (domEl && isVisible(domEl)) {
+      return domEl;
+    }
+  }
+
+  // 3. Fallback: match button by exact text or aria-label
+  const targetLabel = String(selected.name || selected.label || "").trim().toLowerCase();
+  if (targetLabel) {
+    const buttons = getEligibleButtons();
+    const found = buttons.find((btn) => {
+      const btnLabel = getElementLabel(btn).toLowerCase();
+      return btnLabel === targetLabel || btnLabel.includes(targetLabel);
+    });
+
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
 }
 
-/*
-  Observe dynamic React page changes and rediscover actions.
-*/
+/* -----------------------------------------
+   Highlight & Scroll to Action Target
+----------------------------------------- */
+
+export function highlightDiscoveredButton(element) {
+  if (!element || typeof window === "undefined") return;
+
+  try {
+    element.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+      inline: "nearest",
+    });
+
+    element.classList.add("ai-highlight-target");
+    if (typeof element.focus === "function") {
+      element.focus({ preventScroll: true });
+    }
+
+    setTimeout(() => {
+      if (element && element.classList) {
+        element.classList.remove("ai-highlight-target");
+      }
+    }, 3600);
+  } catch (err) {
+    console.warn("Could not highlight element:", err);
+  }
+}
+
+/* -----------------------------------------
+   Observe React page changes
+----------------------------------------- */
+
 export function observePageButtons(callback) {
   if (typeof document === "undefined") {
     return () => {};
@@ -304,16 +451,21 @@ export function observePageButtons(callback) {
     console.error(
       "Hourmaker AI: Observer callback must be a function."
     );
+
     return () => {};
   }
 
   const container = getMainContent();
 
   if (!container) {
-    console.warn("Hourmaker AI: Main content not found.");
+    console.warn(
+      "Hourmaker AI: Main content not found."
+    );
+
     return () => {};
   }
 
+  // Initial discovery.
   callback(discoverCurrentPage());
 
   let updateTimeout = null;
@@ -332,6 +484,7 @@ export function observePageButtons(callback) {
     childList: true,
     subtree: true,
     attributes: true,
+
     attributeFilter: [
       "disabled",
       "aria-disabled",
@@ -346,10 +499,12 @@ export function observePageButtons(callback) {
       "data-ai-category",
       "data-ai-risk",
       "data-ai-confirm",
-      "data-ai-sensitive"
+      "data-ai-sensitive",
+      "data-ai-path"
     ]
   });
 
+  // Cleanup observer.
   return function stopObserving() {
     observer.disconnect();
 

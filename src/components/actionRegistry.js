@@ -1,20 +1,5 @@
 
-/*
-  src/components/actionRegistry.js
-
-  Stores discovered action metadata across visited pages.
-  Does not store DOM elements.
-*/
-
-const STORAGE_KEY = "hourmaker_action_registry_v1";
-
-const STOP_WORDS = new Set([
-  "i", "me", "my", "the", "a", "an", "to",
-  "please", "can", "could", "would", "want",
-  "like", "need", "show", "open", "go", "take",
-  "bring", "navigate", "get", "see", "view",
-  "find", "search", "for", "on", "in", "us"
-]);
+const STORAGE_KEY = "hourmaker_action_registry_v2";
 
 function normalize(value) {
   return String(value || "")
@@ -24,178 +9,130 @@ function normalize(value) {
     .trim();
 }
 
-function getWords(value) {
-  return normalize(value)
-    .split(" ")
-    .filter((word) => word && !STOP_WORDS.has(word));
-}
-
 function readRegistry() {
-  if (typeof window === "undefined") return [];
-
   try {
     const saved = sessionStorage.getItem(STORAGE_KEY);
     const parsed = saved ? JSON.parse(saved) : [];
-
     return Array.isArray(parsed) ? parsed : [];
-  } catch (error) {
-    console.error("Hourmaker AI registry read error:", error);
+  } catch {
     return [];
   }
 }
 
 function writeRegistry(actions) {
-  if (typeof window === "undefined") return;
-
   try {
-    sessionStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(actions)
-    );
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(actions));
   } catch (error) {
-    console.error("Hourmaker AI registry save error:", error);
+    console.error("Could not save Hourmaker actions:", error);
   }
 }
 
-/*
-  Stable key based on page and action ID.
-*/
-function getActionKey(action) {
-  return `${action.page || ""}::${String(action.name || "").toLowerCase().trim()}::${String(action.label || "").toLowerCase().trim()}`;
+function actionKey(item) {
+  return `${item.page || item.path || ""}::${item.id || normalize(item.name)}`;
 }
 
-/*
-  Save discovered actions from the current page.
-*/
-export function saveDiscoveredActions(capabilities = []) {
-  if (!Array.isArray(capabilities) || !capabilities.length) {
-    return readRegistry();
-  }
+export function saveDiscoveredActions(actions = [], pagePath) {
+  if (typeof window === "undefined") return [];
 
-  const registry = readRegistry();
+  const currentPage =
+    pagePath ||
+    window.location.pathname + window.location.search;
 
-const cleanedRegistry = registry.filter((item) => {
-  if (
-    item.name === "Member Status" &&
-    item.page === "/team"
-  ) {
-    return false;
-  }
+  const existing = readRegistry();
 
-  return true;
-});
-
-const actionMap = new Map(
-  cleanedRegistry.map((item) => [getActionKey(item), item])
-);
-
-  capabilities.forEach((item) => {
-    if (
-      !item ||
-      !item.id ||
-      !item.page ||
-      !item.name ||
-      item.enabled === false ||
-      item.visible === false
-    ) {
-      return;
-    }
-
-    const action = {
-      id: String(item.id),
-      name: String(item.name),
-      label: String(item.label || item.name),
-      description: String(item.description || item.name),
-      category: String(item.category || "ui-action"),
-      page: String(item.page),
-      pageTitle: String(item.pageTitle || ""),
-      risk: String(item.risk || "normal"),
-      sensitive: item.sensitive === true,
+  const discovered = actions
+    .filter((item) => item && item.id && item.name)
+    .map((item) => ({
+      ...item,
+      page: item.page || currentPage,
+      path: item.page || item.path || currentPage,
       type: "action",
-      lastSeenAt: Date.now()
-    };
+      enabled: item.enabled !== false,
+      visible: item.visible !== false,
+      lastSeenAt: Date.now(),
+    }));
 
-    actionMap.set(getActionKey(action), action);
+  const byKey = new Map();
+
+  existing
+    .filter((item) => item.page !== currentPage)
+    .forEach((item) => byKey.set(actionKey(item), item));
+
+  discovered.forEach((item) => {
+    byKey.set(actionKey(item), item);
   });
 
-  const updated = Array.from(actionMap.values());
+  const result = Array.from(byKey.values()).slice(-1000);
 
-  // Keep the registry bounded.
-  const limited = updated.slice(-500);
+  writeRegistry(result);
+  return result;
+}
 
-  writeRegistry(limited);
+export function replaceScannedPageActions(pagePath, actions = []) {
+  if (typeof window === "undefined" || !pagePath) return [];
 
-  return limited;
+  const existing = readRegistry().filter(
+    (item) => item.page !== pagePath
+  );
+
+  const discovered = actions
+    .filter((item) => item && item.id && item.name)
+    .map((item) => ({
+      ...item,
+      page: pagePath,
+      path: pagePath,
+      type: "action",
+      enabled: item.enabled !== false,
+      visible: item.visible !== false,
+      lastSeenAt: Date.now(),
+    }));
+
+  const byKey = new Map();
+
+  existing.forEach((item) => byKey.set(actionKey(item), item));
+  discovered.forEach((item) => byKey.set(actionKey(item), item));
+
+  const result = Array.from(byKey.values()).slice(-1000);
+  writeRegistry(result);
+
+  return result;
 }
 
 export function getRegisteredActions() {
   return readRegistry();
 }
 
-/*
-  Find one unique action matching the user's request.
-  Ambiguous matches are deliberately rejected.
-*/
 export function findRegisteredAction(query) {
-  const queryWords = getWords(query);
+  const words = normalize(query).split(" ").filter(Boolean);
+  if (!words.length) return null;
 
-  if (!queryWords.length) return null;
+  const matches = getRegisteredActions()
+    .filter((item) => item.enabled !== false && item.visible !== false)
+    .map((item) => {
+      const searchable = normalize(
+        `${item.name} ${item.label || ""} ${item.description || ""}`
+      ).split(" ");
 
-  const actions = readRegistry();
-
-  const matches = actions
-    .map((action) => {
-      const name = normalize(
-        `${action.name} ${action.label}`
+      const matched = words.every((word) =>
+        searchable.some((candidate) => candidate === word || candidate.startsWith(word))
       );
 
-      const description = normalize(action.description);
-      const nameWords = name.split(" ").filter(Boolean);
-      const descriptionWords = description.split(" ").filter(Boolean);
+      if (!matched) return null;
 
-      const allWordsMatch = queryWords.every((word) =>
-        nameWords.some(
-          (candidate) =>
-            candidate === word || candidate.startsWith(word)
-        )
-      );
+      const exact = words.filter((word) => searchable.includes(word)).length;
 
-      if (!allWordsMatch) return null;
-
-      const exactName = queryWords.every((word) =>
-        nameWords.includes(word)
-      );
-
-      const score =
-        (exactName ? 100 : 50) +
-        queryWords.length * 10 +
-        (descriptionWords.length ? 1 : 0);
-
-      return { action, score };
+      return {
+        item,
+        score: exact * 100 + words.length * 10,
+      };
     })
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
 
-  if (!matches.length) return null;
-
-  // Do not guess if two actions have the same best score.
-  if (
-    matches.length > 1 &&
-    matches[0].score === matches[1].score &&
-    getActionKey(matches[0].action) !==
-      getActionKey(matches[1].action)
-  ) {
-    return null;
-  }
-
-  return matches[0].action;
+  return matches[0]?.item || null;
 }
 
-/*
-  Optional utility for clearing stored action metadata.
-*/
 export function clearActionRegistry() {
-  if (typeof window === "undefined") return;
-
   sessionStorage.removeItem(STORAGE_KEY);
+  sessionStorage.removeItem("hourmaker_action_registry_v1");
 }

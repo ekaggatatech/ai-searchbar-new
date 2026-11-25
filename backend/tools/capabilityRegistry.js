@@ -1,3 +1,14 @@
+/**
+ * NOTE FOR DEVELOPERS:
+ * 
+ * You DO NOT need to add or edit buttons or routes in this file or anywhere in the backend!
+ * 
+ * The Hourmaker AI assistant (/api/assistant/chat) dynamically receives all frontend
+ * buttons, actions, and pages in the request body sent from the frontend.
+ * 
+ * When you add a new button in the frontend (in src/config/actionsCatalog.js or via <AIAction />),
+ * it is automatically available to the AI Search Bar and backend LLM with ZERO backend code changes.
+ */
 
 const capabilities = [
   {

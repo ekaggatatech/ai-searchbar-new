@@ -195,13 +195,7 @@ function Dashboard() {
             >
               Generate Report
             </button>
-            <button
-  type="button"
-  className="primary-button"
-  onClick={() => alert("Export started successfully!")}
->
-  Export Data
-</button>
+           
           </div>
         </>
       )}
@@ -418,6 +412,41 @@ function TeamPage({ members, setMembers }) {
     );
   }
 
+  function handleExport() {
+    if (!members.length) {
+      alert("No team data available to export.");
+      return;
+    }
+
+    const headers = ["Name", "Email", "Role", "Status"];
+    const rows = members.map((member) => [
+      member.name,
+      member.email,
+      member.role,
+      member.status,
+    ]);
+
+    const csv = [headers, ...rows]
+      .map((row) =>
+        row
+          .map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`)
+          .join(",")
+      )
+      .join("\r\n");
+
+    const blob = new Blob(["\uFEFF", csv], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "hourmaker-team-data.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <Layout>
       <div className="page-heading">
@@ -538,6 +567,20 @@ function TeamPage({ members, setMembers }) {
                 Save Changes
               </button>
               
+<button
+  type="button"
+  className="primary-button"
+  data-ai-action-id="export-team-data"
+  data-ai-description="Export the team member data from the Edit Member section."
+  data-ai-category="employee-management"
+  data-ai-risk="low"
+  title="Export Team Data"
+  onClick={handleExport}
+>
+  Export Data
+</button>
+
+              
             </form>
           )}
         </div>
@@ -608,6 +651,7 @@ function TeamPage({ members, setMembers }) {
                   ? "Deactivate"
                   : "Activate"}
               </button>
+              
             </div>
           ))}
         </div>
@@ -837,6 +881,7 @@ function InvitePage({ members, setMembers }) {
             >
               Reset Form
             </button>
+            
           </div>
         </form>
 
@@ -925,6 +970,13 @@ function SettingsPage() {
               >
                 Save Profile Changes
               </button>
+              <button
+  type="button"
+  data-ai-action
+  data-ai-action-id="Account Created"
+>
+  Account Created
+</button>
             </form>
           </>
         )}
@@ -1132,6 +1184,22 @@ function AppRoutes() {
             description:
               "View, search, edit and manage team members and employee status.",
             roles: ["manager", "admin"],
+            actions: [
+              {
+                id: "export-team-data",
+                name: "Export Data",
+                label: "Export Data",
+                description:
+                  "Export the team member data from the Edit Member section.",
+                path: "/team?section=edit",
+                category: "employee-management",
+                risk: "low",
+                sensitive: false,
+                enabled: true,
+                visible: true,
+                type: "action",
+              },
+            ],
           },
         },
       },
@@ -1200,18 +1268,23 @@ const pageCapabilities = useMemo(
           route.element
       )
       .map((route) => {
-        const title = getRouteTitle(route.path);
+        const title =
+  route.handle?.ai?.title ||
+  getRouteTitle(route.path);
 
         return {
           id: `page-${route.path.replace(/[^a-zA-Z0-9]+/g, "-")}`,
           name: title,
           title,
-          description: `${title} page. Route: ${route.path}`,
+          description:
+  route.handle?.ai?.description || `${title} page`,
           path: route.path,
           page: route.path,
           pageTitle: title,
+          roles: route.handle?.ai?.roles || [],
+          actions: route.handle?.ai?.actions || [],
           type: "page",
-          category: "navigation"
+          category: "navigation",
         };
       }),
   [routes]

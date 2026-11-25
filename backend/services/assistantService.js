@@ -3,7 +3,7 @@ import OpenAI from "openai";
 
 import {
   getAllTools,
-  getTool
+  getTool,
 } from "../tools/toolRegistry.js";
 
 // Register navigation tools
@@ -20,13 +20,15 @@ function getAIClient() {
 
   if (!apiKey) {
     throw new Error(
-      "NVIDIA_API_KEY is missing. Add it to your backend .env file."
+      "NVIDIA_API_KEY is missing. Check your backend .env file."
     );
   }
 
   return new OpenAI({
     apiKey,
-    baseURL: "https://integrate.api.nvidia.com/v1"
+    baseURL: "https://integrate.api.nvidia.com/v1",
+    timeout: 45000,
+    maxRetries: 0,
   });
 }
 
@@ -37,18 +39,26 @@ function getAIClient() {
 function getNvidiaToolDeclarations() {
   const registeredTools = getAllTools();
 
-  return registeredTools.map((tool) => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      description: tool.description || "Execute an available tool.",
-      parameters: tool.parameters || {
-        type: "object",
-        properties: {},
-        additionalProperties: false
-      }
-    }
-  }));
+  if (!Array.isArray(registeredTools)) {
+    throw new Error("Tool registry must return an array.");
+  }
+
+  return registeredTools
+    .filter(
+      (tool) =>
+        tool &&
+        typeof tool.name === "string" &&
+        tool.parameters
+    )
+    .map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description:
+          tool.description || "Select an available capability.",
+        parameters: tool.parameters,
+      },
+    }));
 }
 
 // ==================================================
@@ -61,13 +71,10 @@ function validateCapabilities(capabilities, expectedType) {
   }
 
   const seenIds = new Set();
-
   const validCapabilities = [];
 
   for (const item of capabilities) {
-    if (!item || typeof item !== "object") {
-      continue;
-    }
+    if (!item || typeof item !== "object") continue;
 
     if (
       typeof item.id !== "string" ||
@@ -77,15 +84,10 @@ function validateCapabilities(capabilities, expectedType) {
       continue;
     }
 
-    if (item.type !== expectedType) {
-      continue;
-    }
+    if (item.type !== expectedType) continue;
 
-    if (seenIds.has(item.id)) {
-      continue;
-    }
+    if (seenIds.has(item.id)) continue;
 
-    // Do not allow unavailable capabilities
     if (item.enabled === false || item.visible === false) {
       continue;
     }
@@ -95,30 +97,44 @@ function validateCapabilities(capabilities, expectedType) {
     validCapabilities.push({
       id: item.id,
       name: item.name,
-      description: item.description,
       label: item.label || item.name,
+      description: item.description,
       type: item.type,
-
       category: item.category || "general",
-
       page: item.page || item.path || null,
       pageTitle: item.pageTitle || null,
       path: item.path || item.page || null,
-
       risk: item.risk || "normal",
       sensitive: item.sensitive === true,
-
-      enabled: item.enabled !== false,
-      visible: item.visible !== false
+      enabled: true,
+      visible: true,
     });
   }
 
   return validCapabilities;
 }
+
+// ==================================================
+// DIRECT ACTION MATCHING
+// ==================================================
+
 function findDirectActionMatch(query, capabilities) {
   const stopWords = new Set([
-    "a", "an", "the", "please", "i", "me", "my",
-    "can", "could", "would", "to", "do", "show"
+    "a",
+    "an",
+    "the",
+    "please",
+    "i",
+    "me",
+    "my",
+    "can",
+    "could",
+    "would",
+    "to",
+    "do",
+    "show",
+    "want",
+    "need",
   ]);
 
   const words = query
@@ -127,13 +143,12 @@ function findDirectActionMatch(query, capabilities) {
     .split(/\s+/)
     .filter((word) => word && !stopWords.has(word));
 
-  // Avoid unreliable one-word automatic matches.
   if (words.length < 2) return null;
 
   const matches = capabilities.map((item) => {
-    const name = (item.name || "").toLowerCase();
-    const label = (item.label || "").toLowerCase();
-    const description = (item.description || "").toLowerCase();
+    const name = item.name.toLowerCase();
+    const label = item.label.toLowerCase();
+    const description = item.description.toLowerCase();
 
     const searchableText = `${name} ${label} ${description}`;
 
@@ -141,7 +156,9 @@ function findDirectActionMatch(query, capabilities) {
       searchableText.includes(word)
     );
 
-    if (!allWordsMatch) return { item, score: 0 };
+    if (!allWordsMatch) {
+      return { item, score: 0 };
+    }
 
     let score = 100;
 
@@ -154,9 +171,10 @@ function findDirectActionMatch(query, capabilities) {
 
   matches.sort((a, b) => b.score - a.score);
 
-  if (!matches.length || matches[0].score === 0) return null;
+  if (!matches.length || matches[0].score === 0) {
+    return null;
+  }
 
-  // Do not guess if the best candidates have equal scores.
   if (
     matches.length > 1 &&
     matches[0].score === matches[1].score
@@ -175,39 +193,36 @@ function createSystemPrompt(capabilities, mode) {
   const capabilityList = capabilities.map((item) => ({
     id: item.id,
     name: item.name,
-    description: item.description,
     label: item.label,
+    description: item.description,
     type: item.type,
     category: item.category,
     page: item.page,
     pageTitle: item.pageTitle,
+    path: item.path,
     risk: item.risk,
     sensitive: item.sensitive,
-    enabled: item.enabled,
-    visible: item.visible
   }));
 
   const commonRules = `
-You are Hourmaker AI, an intelligent assistant for an employee management workspace.
+You are Hourmaker AI, an intelligent employee management assistant.
 
-Your job is to understand the user's natural language request and select the best matching capability.
+Your task is to understand the user's request and select the best matching capability.
 
 AVAILABLE CAPABILITIES:
 ${JSON.stringify(capabilityList, null, 2)}
 
 IMPORTANT RULES:
 
-1. Understand the meaning and intention of the user's request.
+1. Understand the user's actual intention.
 2. Match by meaning, not only exact words.
-3. Use capability names, descriptions, labels and categories.
-4. Select only an exact capability ID from the supplied list.
-5. Never invent a capability ID.
-6. Never select a capability that is not in the supplied list.
-7. Do not select disabled or invisible capabilities.
-8. If no capability matches, respond with exactly:
+3. Select only an exact capability ID from the supplied list.
+4. Never invent a capability ID.
+5. Never select unavailable capabilities.
+6. Never claim that an action has been completed.
+7. If nothing matches, respond with exactly:
    No result found.
-9. Do not claim that an action has been completed.
-10. You are selecting a capability, not directly operating the browser.
+8. Use the select_capability function when a capability matches.
 `;
 
   if (mode === "route") {
@@ -215,35 +230,21 @@ IMPORTANT RULES:
 
 CURRENT TASK:
 
-The user is searching for a page or requesting an operation.
+Find the most appropriate page for the user's request.
 
-Choose the most appropriate page from the supplied page capabilities.
+Select only page capabilities.
 
-Possible intents:
-
-- navigate: The user wants to open or view a page.
-- action: The user wants to perform an operation on a page, such as editing, inviting, searching, or changing a status.
+The intent must be:
+- navigate: when the user wants to open or view a page.
+- action: when the user wants to perform an operation on a page.
 
 Examples:
+- Open dashboard -> navigate
+- Show team members -> navigate
+- Invite a new member -> action
+- Edit an employee -> action
 
-User: "Open my dashboard"
-Intent: navigate
-
-User: "Show team members"
-Intent: navigate
-
-User: "Edit an employee"
-Intent: action
-
-User: "Invite a new member"
-Intent: action
-
-User: "Change employee status"
-Intent: action
-
-Select the relevant page capability and use the select_capability tool.
-
-Do not select a button capability in route mode.
+Use the select_capability function.
 `;
   }
 
@@ -252,50 +253,83 @@ Do not select a button capability in route mode.
 
 CURRENT TASK:
 
-The user has reached the relevant page.
+The user is already on the relevant page.
 
-Now identify the exact button or operation that matches the user's request.
+Find the exact button or operation requested.
 
 Rules:
+- Select only action capabilities.
+- Use the exact capability ID.
+- Never select a page capability.
+- Never invent an action.
+- Sensitive operations must not be executed automatically.
+- The intent must be action.
 
-1. Select only an action capability.
-2. Use the exact capability ID.
-3. Match the user's intention with the button name and description.
-4. Do not select a navigation capability.
-5. Never invent an action.
-6. If no suitable action exists, respond:
-   No result found.
-7. Sensitive or manual operations must not be executed automatically.
-8. The application will independently enforce its safety checks.
-
-Use the select_capability tool with intent "action".
+Use the select_capability function.
 `;
   }
 
-  throw new Error("Invalid assistant mode. Use route or action.");
+  throw new Error("Invalid assistant mode.");
 }
 
 // ==================================================
 // PARSE TOOL ARGUMENTS
 // ==================================================
 
-function parseToolArguments(argumentsValue) {
-  if (typeof argumentsValue === "string") {
+function parseToolArguments(value) {
+  if (typeof value === "string") {
     try {
-      return JSON.parse(argumentsValue);
+      return JSON.parse(value);
     } catch {
-      throw new Error("AI returned invalid tool arguments.");
+      throw new Error("NVIDIA returned invalid tool arguments.");
     }
   }
 
-  if (
-    argumentsValue &&
-    typeof argumentsValue === "object"
-  ) {
-    return argumentsValue;
+  if (value && typeof value === "object") {
+    return value;
   }
 
-  throw new Error("AI returned empty tool arguments.");
+  throw new Error("NVIDIA returned empty tool arguments.");
+}
+
+// ==================================================
+// EXECUTE CAPABILITY SELECTION
+// ==================================================
+
+async function executeSelection(
+  selectionTool,
+  capability,
+  intent
+) {
+  const result = await selectionTool.execute({
+    capabilityId: capability.id,
+    intent,
+  });
+
+  if (
+    !result ||
+    result.success !== true ||
+    result.capabilityId !== capability.id ||
+    result.intent !== intent
+  ) {
+    throw new Error("Capability selection failed.");
+  }
+
+  return {
+    type: "tool_result",
+    tool: "select_capability",
+    result: {
+      success: true,
+      capabilityId: capability.id,
+      intent,
+      type: capability.type,
+      page: capability.name,
+      path: capability.path || null,
+      risk: capability.risk,
+      sensitive: capability.sensitive,
+      message: `Selected ${capability.name}.`,
+    },
+  };
 }
 
 // ==================================================
@@ -308,96 +342,66 @@ export async function runAssistant(
   mode = "route"
 ) {
   try {
-    // Validate query
-    if (
-      typeof query !== "string" ||
-      !query.trim()
-    ) {
+    if (typeof query !== "string" || !query.trim()) {
       throw new Error("Please enter a valid search query.");
     }
 
-    // Validate mode
     if (!["route", "action"].includes(mode)) {
       throw new Error("Invalid assistant mode.");
     }
 
-    // Determine expected capability type
-    const expectedType = mode === "route" ? "page" : "action";
+    const expectedType =
+      mode === "route" ? "page" : "action";
 
-    // Validate capability list
     const validCapabilities = validateCapabilities(
       capabilities,
       expectedType
     );
-    if (mode === "action") {
-  console.log(
-    "DIRECT MATCH:",
-    findDirectActionMatch(query, validCapabilities)
-  );
-}
 
     if (validCapabilities.length === 0) {
       return {
         type: "message",
-        message: "No result found."
+        message: "No result found.",
       };
     }
 
-    // Check tool registration
     const selectionTool = getTool("select_capability");
 
-    if (!selectionTool) {
+    if (
+      !selectionTool ||
+      typeof selectionTool.execute !== "function"
+    ) {
       throw new Error(
-        "select_capability tool is not registered. Check navigationTools.js."
+        "select_capability tool is not registered correctly."
       );
     }
-    // Direct matching for actions before calling NVIDIA AI.
-if (mode === "action") {
-  const directMatch = findDirectActionMatch(
-    query,
-    validCapabilities
-  );
 
-  if (directMatch) {
-    console.log(
-      "Hourmaker direct action match:",
-      directMatch.name,
-      directMatch.id
-    );
+    // Fast direct matching for actions
+    if (mode === "action") {
+      const directMatch = findDirectActionMatch(
+        query,
+        validCapabilities
+      );
 
-    const toolResult = await selectionTool.execute({
-      capabilityId: directMatch.id,
-      intent: "action"
-    });
+      if (directMatch) {
+        console.log(
+          "Hourmaker direct action match:",
+          directMatch.name,
+          directMatch.id
+        );
 
-    if (
-      toolResult &&
-      toolResult.success === true &&
-      toolResult.capabilityId === directMatch.id
-    ) {
-      return {
-        type: "tool_result",
-        tool: "select_capability",
-        result: {
-          success: true,
-          capabilityId: directMatch.id,
-          intent: "action",
-          type: "action",
-          page: directMatch.name,
-          path: directMatch.path || null,
-          risk: directMatch.risk,
-          sensitive: directMatch.sensitive,
-          message: "Selected " + directMatch.name + "."
-        }
-      };
+        return await executeSelection(
+          selectionTool,
+          directMatch,
+          "action"
+        );
+      }
     }
-  }
-}
 
-    // Create AI client
+    // Create NVIDIA client
     const ai = getAIClient();
 
-    // Get tool declarations
+    // Find selection function declaration
     const tools = getNvidiaToolDeclarations();
 
     const selectionDeclaration = tools.find(
@@ -407,29 +411,34 @@ if (mode === "action") {
 
     if (!selectionDeclaration) {
       throw new Error(
-        "select_capability tool declaration was not found."
+        "select_capability declaration is missing from toolRegistry.js."
       );
     }
 
-    // Create system prompt
     const systemPrompt = createSystemPrompt(
       validCapabilities,
       mode
     );
 
-    // Send request to NVIDIA
+    console.log("Hourmaker NVIDIA request:", {
+      model: MODEL,
+      mode,
+      capabilityCount: validCapabilities.length,
+    });
+
+    // NVIDIA API request
     const completion = await ai.chat.completions.create({
       model: MODEL,
 
       messages: [
         {
           role: "system",
-          content: systemPrompt
+          content: systemPrompt,
         },
         {
           role: "user",
-          content: query.trim()
-        }
+          content: query.trim(),
+        },
       ],
 
       tools: [selectionDeclaration],
@@ -438,42 +447,37 @@ if (mode === "action") {
 
       temperature: 0.2,
 
-      max_tokens: 1024
+      max_tokens: 512,
+
+      // Reduce unnecessary reasoning time.
+      reasoning_effort: "none",
+
+      // Request a normal JSON response, not a stream.
+      stream: false,
     });
 
     const message = completion.choices?.[0]?.message;
 
     if (!message) {
-      throw new Error("NVIDIA AI returned an empty response.");
+      throw new Error("NVIDIA returned an empty response.");
     }
 
-    // Handle normal text response
-    if (!message.tool_calls || message.tool_calls.length === 0) {
-      const answer =
-        typeof message.content === "string"
-          ? message.content.trim()
-          : "";
-
-      if (
-        answer.toLowerCase().includes("no result found")
-      ) {
-        return {
-          type: "message",
-          message: "No result found."
-        };
-      }
-
+    // No tool call
+    if (
+      !Array.isArray(message.tool_calls) ||
+      message.tool_calls.length === 0
+    ) {
       return {
         type: "message",
-        message: "No result found."
+        message: "No result found.",
       };
     }
 
-    // Only one capability selection is allowed
+    // Allow only one selection
     if (message.tool_calls.length !== 1) {
       return {
         type: "message",
-        message: "No result found."
+        message: "No result found.",
       };
     }
 
@@ -485,17 +489,16 @@ if (mode === "action") {
     ) {
       return {
         type: "message",
-        message: "No result found."
+        message: "No result found.",
       };
     }
 
-    // Parse AI arguments
-    const toolArguments = parseToolArguments(
+    const args = parseToolArguments(
       toolCall.function.arguments
     );
 
-    const capabilityId = toolArguments.capabilityId;
-    const intent = toolArguments.intent;
+    const capabilityId = args.capabilityId;
+    const intent = args.intent;
 
     // Validate intent
     const allowedIntents =
@@ -506,11 +509,11 @@ if (mode === "action") {
     if (!allowedIntents.includes(intent)) {
       return {
         type: "message",
-        message: "No result found."
+        message: "No result found.",
       };
     }
 
-    // Find exact selected capability
+    // Find capability by exact ID
     const selectedCapability = validCapabilities.find(
       (item) => item.id === capabilityId
     );
@@ -518,77 +521,46 @@ if (mode === "action") {
     if (!selectedCapability) {
       return {
         type: "message",
-        message: "No result found."
+        message: "No result found.",
       };
     }
 
-    // Verify capability type and intent
+    // Verify capability type
     if (
       mode === "route" &&
       selectedCapability.type !== "page"
     ) {
       return {
         type: "message",
-        message: "No result found."
+        message: "No result found.",
       };
     }
 
     if (
       mode === "action" &&
-      (
-        selectedCapability.type !== "action" ||
-        intent !== "action"
-      )
+      selectedCapability.type !== "action"
     ) {
       return {
         type: "message",
-        message: "No result found."
+        message: "No result found.",
       };
     }
 
-    // Execute registered selection tool
-    const toolResult = await selectionTool.execute({
-      capabilityId,
+    // Execute only the validated selection
+    return await executeSelection(
+      selectionTool,
+      selectedCapability,
       intent
-    });
-
-    if (
-      !toolResult ||
-      toolResult.success !== true ||
-      toolResult.capabilityId !== capabilityId ||
-      toolResult.intent !== intent
-    ) {
-      throw new Error("Capability selection failed.");
-    }
-
-    // Return response in the format expected by AISearchBar.jsx
-    return {
-      type: "tool_result",
-      tool: "select_capability",
-
-      result: {
-        success: true,
-        capabilityId: selectedCapability.id,
-        intent,
-
-        type: selectedCapability.type,
-
-        page: selectedCapability.name,
-        path: selectedCapability.path || null,
-
-        risk: selectedCapability.risk,
-        sensitive: selectedCapability.sensitive,
-
-        message:
-          "Selected " + selectedCapability.name + "."
-      }
-    };
+    );
 
   } catch (error) {
-    console.error(
-      "Hourmaker assistant service error:",
-      error
-    );
+    console.error("Hourmaker assistant service error:", {
+      message: error.message,
+      status: error.status,
+      code: error.code,
+      response: error.response?.data,
+      requestId: error.request_id,
+    });
 
     throw error;
   }
