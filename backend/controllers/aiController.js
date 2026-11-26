@@ -1,4 +1,4 @@
-import { generateAIResponse } from "../services/geminiService.js";
+import { generateAIResponse } from "../services/apiService.js";
 
 export const searchWithAI = async (req, res) => {
   try {
@@ -19,7 +19,7 @@ export const searchWithAI = async (req, res) => {
       answer,
     });
   } catch (error) {
-  console.error("========== GEMINI ERROR ==========");
+  console.error("========== AI ERROR ==========");
   console.error("Message:", error.message);
   console.error("Status:", error.status);
   console.error("Details:", error.errorDetails);
